@@ -21,66 +21,72 @@ import mcp.server.stdio
 """
 Ashby MCP Server - Model Context Protocol server for Ashby ATS integration.
 
-This server provides tools to interact with the Ashby API including:
-- Candidate management (create, search, list, get detailed info)
-- Resume/file access
-- Notes (list and create)
-- Application history and activity timeline
-- Interview feedback and scorecards
-- Job management
-- Interview scheduling
-- Analytics
+This server provides READ-ONLY tools to query the Ashby API. All endpoints
+have been verified against the official Ashby API documentation. No action
+endpoints (create, update, delete, schedule) are exposed.
 
-## Important Distinctions
+## Tool Categories
 
-**Candidate ID vs Application ID**:
-- Candidate-level tools (get_candidate_info, list_candidate_notes, create_candidate_note)
-  require a `candidate_id`
-- Application-level tools (get_application_history, get_application_feedback)
-  require an `application_id`
-- Use `get_candidate_info` to retrieve a candidate's `applicationIds` to bridge between them
+- **Candidate Discovery & Details**: Search/list candidates, view profiles, resumes, notes
+- **Application Tracking**: List/inspect applications, history, feedback/scorecards
+- **Job & Opening Intelligence**: Search/list jobs, inspect openings for headcount tracking
+- **Interview Intelligence**: View interview schedules, events, stages, and plans
+- **Offers & Organization**: Track offers, view department structure
+
+## Key Concepts
+
+- **Candidate ID vs Application ID**: Candidate-level tools require a `candidate_id`,
+  application-level tools require an `application_id`. Use `get_candidate_info` to
+  retrieve a candidate's `applicationIds` to bridge between them.
+- **Jobs vs Openings**: A Job is a role being hired for. An Opening represents a
+  specific headcount slot within a job (e.g., "3 openings for Software Engineer").
+  Use openings to answer "are we ahead or behind plan?" questions.
+- **Interview Plans vs Stages vs Schedules vs Events**: An interview plan defines
+  the process for a job. Stages are steps within a plan. Schedules are actual
+  scheduled interview sessions. Events are individual calendar events within a schedule.
+
+## Common Workflows
+
+1. **"How many candidates for this role?"**:
+   search_jobs → list_applications (filter by jobId)
+
+2. **"Anyone at the final stage?"**:
+   list_applications (filter by jobId) → get_application_info (check currentInterviewStage)
+
+3. **"What happened to this candidate?"**:
+   search_candidates → get_candidate_info → get_application_history
+
+4. **"When is someone being interviewed next?"**:
+   get_application_info → list_interview_schedules (filter by applicationId)
+   → list_interview_events
+
+5. **"Are we ahead or behind plan?"**:
+   list_jobs (filter by status) → list_openings (check openingState: Open vs Filled)
+
+6. **"How many hires in Q1?"**:
+   list_applications (filter by status=Hired, createdAfter/before dates)
 
 ## API Limitations
 
-**Not Available via API** (visible in Ashby UI only):
-- Email communication history
-- SMS/text message history
-
-**Other Notes**:
-- File download URLs from `get_resume_url` may expire over time
-- Some endpoints require specific Ashby API permissions (candidatesRead, candidatesWrite)
-
-## Example Workflows
-
-1. **Get candidate's LinkedIn and resume**:
-   search_candidates → get_candidate_info → get_resume_url
-
-2. **View and add notes**:
-   get_candidate_info → list_candidate_notes → create_candidate_note
-
-3. **Review application progress**:
-   get_candidate_info → get_application_history → get_application_feedback
+- Email and SMS communication history are not available via API
+- File download URLs from `get_resume_url` may expire
+- Pagination uses cursor-based pagination (max 100 results per page)
 """
 
 class AshbyClient:
     """Handles Ashby operations and caching."""
-    
+
     def __init__(self):
         self.api_key: Optional[str] = None
         self.base_url = "https://api.ashbyhq.com"
         self.headers = {}
 
     def connect(self) -> bool:
-        """Establishes connection to Ashby using API key from environment variables.
-        
-        Returns:
-            bool: True if connection successful, False otherwise
-        """
         try:
             self.api_key = os.getenv('ASHBY_API_KEY')
             if not self.api_key:
                 raise ValueError("ASHBY_API_KEY environment variable not set")
-            
+
             credentials = base64.b64encode(f"{self.api_key}:".encode()).decode()
             self.headers = {
                 "Authorization": f"Basic {credentials}",
@@ -91,26 +97,15 @@ class AshbyClient:
             print(f"Ashby connection failed: {str(e)}")
             return False
 
-    def _make_request(self, endpoint: str, method: str = "GET", data: Optional[dict] = None) -> dict:
-        """Make a request to the Ashby API.
-        
-        Args:
-            endpoint (str): The API endpoint to call
-            method (str): HTTP method (GET, POST, etc.)
-            data (Optional[dict]): Data to send with the request
-            
-        Returns:
-            dict: Response from the API
-        """
+    def _make_request(self, endpoint: str, data: Optional[dict] = None) -> dict:
         if not self.api_key:
             raise ValueError("Ashby connection not established")
-            
+
         url = f"{self.base_url}{endpoint}"
-        response = requests.request(
-            method=method,
+        response = requests.post(
             url=url,
             headers=self.headers,
-            json=data
+            json=data or {}
         )
         response.raise_for_status()
         return response.json()
@@ -128,497 +123,436 @@ if not ashby_client.connect():
 
 @server.list_tools()
 async def handle_list_tools() -> list[types.Tool]:
-    """
-    List available tools for Ashby operations.
-    """
     return [
-        # Candidate Management Tools
-        types.Tool(
-            name="create_candidate",
-            description="Creates a new candidate in Ashby",
-            inputSchema={
-                "type": "object",
-                "properties": {
-                    "name": {"type": "string", "description": "Candidate's full name"},
-                    "email": {"type": "string", "description": "Candidate's email address"},
-                    "phone_number": {"type": "string", "description": "Candidate's phone number"}
-                },
-                "required": ["name", "email"]
-            }
-        ),
+        # ── Candidate Discovery & Details ──────────────────────────────
+
         types.Tool(
             name="search_candidates",
-            description="Search for candidates by email and/or name",
+            description="Search for candidates by email and/or name. Returns matching candidate records.",
             inputSchema={
                 "type": "object",
                 "properties": {
-                    "email": {"type": "string", "description": "Candidate's email"},
+                    "email": {"type": "string", "description": "Candidate's email address"},
                     "name": {"type": "string", "description": "Candidate's name"}
                 }
             }
         ),
         types.Tool(
             name="list_candidates",
-            description="List candidates with pagination and filtering",
+            description="List all candidates with cursor-based pagination. Returns up to 100 candidates per page.",
             inputSchema={
                 "type": "object",
                 "properties": {
-                    "page": {"type": "integer", "description": "Page number", "default": 1},
-                    "page_size": {"type": "integer", "description": "Results per page", "default": 100},
-                    "filters": {
-                        "type": "object",
-                        "description": "Additional filters to apply"
-                    }
+                    "cursor": {"type": "string", "description": "Opaque cursor from a previous response for pagination"},
+                    "limit": {"type": "integer", "description": "Max results to return (max 100)", "default": 100},
+                    "syncToken": {"type": "string", "description": "Token for incremental sync to only get changes since last call"}
                 }
             }
         ),
         types.Tool(
             name="get_candidate_info",
-            description="Get detailed information about a specific candidate including LinkedIn, resume, and application IDs",
+            description="Get detailed information about a specific candidate including name, email, phone, LinkedIn, resume file handle, application IDs, tags, and custom fields.",
             inputSchema={
                 "type": "object",
                 "properties": {
-                    "candidate_id": {"type": "string", "description": "The unique ID of the candidate"}
+                    "id": {"type": "string", "description": "The candidate's UUID"}
                 },
-                "required": ["candidate_id"]
+                "required": ["id"]
             }
         ),
         types.Tool(
             name="get_resume_url",
-            description="Get a downloadable URL for a candidate's resume file",
+            description="Get a downloadable URL for a candidate's resume file. Use the file handle from the candidate's resumeFileHandle.handle field.",
             inputSchema={
                 "type": "object",
                 "properties": {
-                    "file_handle": {"type": "string", "description": "The file handle from candidate resumeFileHandle.handle field"}
+                    "fileHandle": {"type": "string", "description": "The file handle from candidate's resumeFileHandle.handle field"}
                 },
-                "required": ["file_handle"]
+                "required": ["fileHandle"]
             }
         ),
         types.Tool(
             name="list_candidate_notes",
-            description="List all notes on a candidate's profile",
+            description="List all notes on a candidate's profile.",
             inputSchema={
                 "type": "object",
                 "properties": {
-                    "candidate_id": {"type": "string", "description": "The ID of the candidate"},
-                    "cursor": {"type": "string", "description": "Pagination cursor for next page"},
-                    "limit": {"type": "integer", "description": "Number of results to return", "default": 100}
+                    "candidateId": {"type": "string", "description": "The candidate's UUID"},
+                    "cursor": {"type": "string", "description": "Pagination cursor"},
+                    "limit": {"type": "integer", "description": "Max results to return (max 100)", "default": 100}
                 },
-                "required": ["candidate_id"]
+                "required": ["candidateId"]
+            }
+        ),
+
+        # ── Application Tracking ───────────────────────────────────────
+
+        types.Tool(
+            name="list_applications",
+            description="List all applications with filtering. Filter by status (Hired/Archived/Active/Lead) and jobId to answer questions like 'how many candidates for this role?' or 'how many hires this quarter?'.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "cursor": {"type": "string", "description": "Pagination cursor"},
+                    "limit": {"type": "integer", "description": "Max results to return (max 100)", "default": 100},
+                    "syncToken": {"type": "string", "description": "Token for incremental sync"},
+                    "createdAfter": {"type": "integer", "description": "Only return applications created after this timestamp (Unix epoch milliseconds)"},
+                    "status": {
+                        "type": "string",
+                        "description": "Filter by status",
+                        "enum": ["Hired", "Archived", "Active", "Lead"]
+                    },
+                    "jobId": {"type": "string", "description": "Filter by job UUID"},
+                    "expand": {
+                        "type": "array",
+                        "items": {"type": "string", "enum": ["openings"]},
+                        "description": "Expand related objects inline"
+                    }
+                }
             }
         ),
         types.Tool(
-            name="create_candidate_note",
-            description="Create a new note on a candidate's profile",
+            name="get_application_info",
+            description="Get detailed information about a specific application including its current interview stage, status (Hired/Archived/Active/Lead), candidate info, job info, source, archive reason, and hiring team.",
             inputSchema={
                 "type": "object",
                 "properties": {
-                    "candidate_id": {"type": "string", "description": "The ID of the candidate"},
-                    "note": {"type": "string", "description": "The note content"},
-                    "note_type": {
-                        "type": "string",
-                        "enum": ["text/plain", "text/html"],
-                        "description": "The format of the note (default: text/plain)",
-                        "default": "text/plain"
+                    "applicationId": {"type": "string", "description": "The application UUID"},
+                    "expand": {
+                        "type": "array",
+                        "items": {"type": "string", "enum": ["openings", "applicationFormSubmissions", "referrals"]},
+                        "description": "Expand related objects inline"
                     }
                 },
-                "required": ["candidate_id", "note"]
+                "required": ["applicationId"]
             }
         ),
         types.Tool(
             name="get_application_history",
-            description="Get the activity timeline and stage changes for an application",
+            description="Get the activity timeline and stage changes for an application. Shows when a candidate moved between stages, received feedback, etc.",
             inputSchema={
                 "type": "object",
                 "properties": {
-                    "application_id": {"type": "string", "description": "The ID of the application"},
-                    "cursor": {"type": "string", "description": "Pagination cursor for next page"},
-                    "limit": {"type": "integer", "description": "Number of results to return", "default": 25}
+                    "applicationId": {"type": "string", "description": "The application UUID"},
+                    "cursor": {"type": "string", "description": "Pagination cursor"},
+                    "limit": {"type": "integer", "description": "Max results to return (max 100)", "default": 100}
                 },
-                "required": ["application_id"]
+                "required": ["applicationId"]
             }
         ),
         types.Tool(
             name="get_application_feedback",
-            description="Get interview feedback and scorecards for an application",
+            description="Get interview feedback and scorecards for an application. Can also list all feedback org-wide when no applicationId is provided.",
             inputSchema={
                 "type": "object",
                 "properties": {
-                    "application_id": {"type": "string", "description": "The ID of the application"},
-                    "cursor": {"type": "string", "description": "Pagination cursor for next page"},
-                    "limit": {"type": "integer", "description": "Number of results to return", "default": 100}
-                },
-                "required": ["application_id"]
+                    "applicationId": {"type": "string", "description": "Filter feedback to a specific application UUID"},
+                    "cursor": {"type": "string", "description": "Pagination cursor"},
+                    "limit": {"type": "integer", "description": "Max results to return (max 100)", "default": 100},
+                    "syncToken": {"type": "string", "description": "Token for incremental sync"},
+                    "createdAfter": {"type": "integer", "description": "Only return feedback created after this timestamp (Unix epoch milliseconds)"}
+                }
             }
         ),
 
-        # Job Management Tools
-        types.Tool(
-            name="create_job",
-            description="Creates a new job posting",
-            inputSchema={
-                "type": "object",
-                "properties": {
-                    "title": {"type": "string", "description": "Job title"},
-                    "description": {"type": "string", "description": "Job description"},
-                    "department": {"type": "string", "description": "Department name"},
-                    "location": {"type": "string", "description": "Job location"}
-                },
-                "required": ["title", "description"]
-            }
-        ),
+        # ── Job & Opening Intelligence ─────────────────────────────────
+
         types.Tool(
             name="search_jobs",
-            description="Search for jobs by title and filters",
+            description="Search for jobs by title. Returns matching job records.",
             inputSchema={
                 "type": "object",
                 "properties": {
-                    "title": {"type": "string", "description": "Job title to search for"},
-                    "location": {"type": "string", "description": "Filter by location"},
-                    "department": {"type": "string", "description": "Filter by department"},
-                    "include_unlisted": {"type": "boolean", "description": "Include unlisted jobs"}
+                    "title": {"type": "string", "description": "Job title to search for"}
                 }
             }
         ),
-        
-        # Application Management Tools
         types.Tool(
-            name="create_application",
-            description="Creates a new application",
+            name="list_jobs",
+            description="List all jobs with optional status and date filters. Use this to answer 'how many open roles are there?' by filtering status=['Open'].",
             inputSchema={
                 "type": "object",
                 "properties": {
-                    "candidate_id": {"type": "string", "description": "Candidate ID"},
-                    "job_id": {"type": "string", "description": "Job ID"},
-                    "source": {"type": "string", "description": "Application source"}
-                },
-                "required": ["candidate_id", "job_id"]
-            }
-        ),
-        types.Tool(
-            name="list_applications",
-            description="List applications with pagination and filtering",
-            inputSchema={
-                "type": "object",
-                "properties": {
-                    "page": {"type": "integer", "description": "Page number", "default": 1},
-                    "page_size": {"type": "integer", "description": "Results per page", "default": 100},
-                    "filters": {
-                        "type": "object",
-                        "description": "Additional filters to apply"
+                    "cursor": {"type": "string", "description": "Pagination cursor"},
+                    "limit": {"type": "integer", "description": "Max results to return (max 100)", "default": 100},
+                    "syncToken": {"type": "string", "description": "Token for incremental sync"},
+                    "status": {
+                        "type": "array",
+                        "items": {"type": "string", "enum": ["Draft", "Open", "Closed", "Archived"]},
+                        "description": "Filter by job status(es)"
+                    },
+                    "openedAfter": {"type": "integer", "description": "Jobs opened after this timestamp (Unix epoch ms)"},
+                    "openedBefore": {"type": "integer", "description": "Jobs opened before this timestamp (Unix epoch ms)"},
+                    "closedAfter": {"type": "integer", "description": "Jobs closed after this timestamp (Unix epoch ms)"},
+                    "closedBefore": {"type": "integer", "description": "Jobs closed before this timestamp (Unix epoch ms)"},
+                    "expand": {
+                        "type": "array",
+                        "items": {"type": "string", "enum": ["location", "openings"]},
+                        "description": "Expand related objects inline"
                     }
                 }
             }
         ),
-        
-        # Interview Management Tools
         types.Tool(
-            name="create_interview",
-            description="Creates a new interview",
+            name="get_job_info",
+            description="Get detailed information about a specific job including title, status, department, location, custom fields, and optionally its openings.",
             inputSchema={
                 "type": "object",
                 "properties": {
-                    "application_id": {"type": "string", "description": "Application ID"},
-                    "interviewer_ids": {
+                    "id": {"type": "string", "description": "The job UUID"},
+                    "expand": {
                         "type": "array",
-                        "items": {"type": "string"},
-                        "description": "List of interviewer IDs"
-                    },
-                    "start_time": {"type": "string", "description": "Interview start time (ISO format)"},
-                    "duration": {"type": "integer", "description": "Interview duration in minutes"},
-                    "type": {"type": "string", "description": "Interview type"}
+                        "items": {"type": "string", "enum": ["location", "openings"]},
+                        "description": "Expand related objects inline"
+                    }
                 },
-                "required": ["application_id", "interviewer_ids", "start_time", "duration"]
+                "required": ["id"]
             }
         ),
+        types.Tool(
+            name="list_openings",
+            description="List all openings (headcount slots). Each opening has an openingState (Approved/Open/Closed/Draft/Filled). Use this to track headcount: compare Open vs Filled openings to see if hiring is ahead or behind plan.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "cursor": {"type": "string", "description": "Pagination cursor"},
+                    "syncToken": {"type": "string", "description": "Token for incremental sync"}
+                }
+            }
+        ),
+        types.Tool(
+            name="get_opening_info",
+            description="Get details about a specific opening (headcount slot) including its state, associated jobs, locations, and hiring team.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "openingId": {"type": "string", "description": "The opening UUID"}
+                },
+                "required": ["openingId"]
+            }
+        ),
+
+        # ── Interview Intelligence ─────────────────────────────────────
+
         types.Tool(
             name="list_interviews",
-            description="List interviews with filtering",
+            description="List all interviews in the organization with optional filters.",
             inputSchema={
                 "type": "object",
                 "properties": {
-                    "application_id": {"type": "string", "description": "Filter by application ID"},
-                    "start_date": {"type": "string", "description": "Filter by start date"},
-                    "end_date": {"type": "string", "description": "Filter by end date"}
+                    "cursor": {"type": "string", "description": "Pagination cursor"},
+                    "limit": {"type": "integer", "description": "Max results to return (max 100)", "default": 100},
+                    "syncToken": {"type": "string", "description": "Token for incremental sync"}
                 }
             }
         ),
-        
-        # Analytics Tools
         types.Tool(
-            name="get_pipeline_metrics",
-            description="Get pipeline metrics for jobs",
+            name="get_interview_info",
+            description="Get details about a specific interview by ID.",
             inputSchema={
                 "type": "object",
                 "properties": {
-                    "job_id": {"type": "string", "description": "Filter by job ID"},
-                    "date_range": {
-                        "type": "object",
-                        "properties": {
-                            "start": {"type": "string", "description": "Start date"},
-                            "end": {"type": "string", "description": "End date"}
-                        }
-                    }
+                    "id": {"type": "string", "description": "The interview UUID"}
+                },
+                "required": ["id"]
+            }
+        ),
+        types.Tool(
+            name="list_interview_schedules",
+            description="List interview schedules. Filter by applicationId to find when a specific candidate is being interviewed next, or by interviewStageId to see all schedules for a particular stage.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "cursor": {"type": "string", "description": "Pagination cursor"},
+                    "limit": {"type": "integer", "description": "Max results to return (max 100)", "default": 100},
+                    "syncToken": {"type": "string", "description": "Token for incremental sync"},
+                    "createdAfter": {"type": "integer", "description": "Only return schedules created after this timestamp (Unix epoch ms)"},
+                    "applicationId": {"type": "string", "description": "Filter by application UUID"},
+                    "interviewStageId": {"type": "string", "description": "Filter by interview stage UUID"}
                 }
             }
         ),
-        
-        # Batch Operations
         types.Tool(
-            name="bulk_create_candidates",
-            description="Create multiple candidates in a single operation",
+            name="list_interview_events",
+            description="List interview events (individual calendar events) for a specific interview schedule. Use this to find exact interview times, interviewers, and locations.",
             inputSchema={
                 "type": "object",
                 "properties": {
-                    "candidates": {
+                    "interviewScheduleId": {"type": "string", "description": "The interview schedule UUID to list events for"},
+                    "expand": {
                         "type": "array",
-                        "items": {
-                            "type": "object",
-                            "properties": {
-                                "name": {"type": "string"},
-                                "email": {"type": "string"},
-                                "phone_number": {"type": "string"}
-                            },
-                            "required": ["name", "email"]
-                        }
+                        "items": {"type": "string", "enum": ["interview"]},
+                        "description": "Expand the interview object inline"
                     }
                 },
-                "required": ["candidates"]
+                "required": ["interviewScheduleId"]
             }
         ),
         types.Tool(
-            name="bulk_update_applications",
-            description="Update multiple applications in a single operation",
+            name="list_interview_stages",
+            description="List all interview stages for a given interview plan, in order. Shows the sequence of stages candidates go through (e.g., Phone Screen → Technical → Onsite → Offer).",
             inputSchema={
                 "type": "object",
                 "properties": {
-                    "updates": {
-                        "type": "array",
-                        "items": {
-                            "type": "object",
-                            "properties": {
-                                "application_id": {"type": "string"},
-                                "updates": {"type": "object"}
-                            },
-                            "required": ["application_id", "updates"]
-                        }
-                    }
+                    "interviewPlanId": {"type": "string", "description": "The interview plan UUID to list stages for"}
                 },
-                "required": ["updates"]
+                "required": ["interviewPlanId"]
             }
         ),
         types.Tool(
-            name="bulk_schedule_interviews",
-            description="Schedule multiple interviews in a single operation",
+            name="list_interview_plans",
+            description="List all interview plans. An interview plan defines the stages and process for hiring for a job.",
             inputSchema={
                 "type": "object",
                 "properties": {
-                    "interviews": {
-                        "type": "array",
-                        "items": {
-                            "type": "object",
-                            "properties": {
-                                "application_id": {"type": "string"},
-                                "interviewer_ids": {"type": "array", "items": {"type": "string"}},
-                                "start_time": {"type": "string"},
-                                "duration": {"type": "integer"},
-                                "type": {"type": "string"}
-                            },
-                            "required": ["application_id", "interviewer_ids", "start_time", "duration"]
-                        }
-                    }
-                },
-                "required": ["interviews"]
+                    "includeArchived": {"type": "boolean", "description": "Include archived plans (default: false)"}
+                }
             }
-        )
+        ),
+
+        # ── Offers & Organization ──────────────────────────────────────
+
+        types.Tool(
+            name="list_offers",
+            description="List all offers with their latest version. Filter by applicationId to see offers for a specific candidate.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "cursor": {"type": "string", "description": "Pagination cursor"},
+                    "limit": {"type": "integer", "description": "Max results to return (max 100)", "default": 100},
+                    "syncToken": {"type": "string", "description": "Token for incremental sync"},
+                    "applicationId": {"type": "string", "description": "Filter by application UUID"}
+                }
+            }
+        ),
+        types.Tool(
+            name="get_offer_info",
+            description="Get details about a specific offer including compensation, status, and approval state.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "offerId": {"type": "string", "description": "The offer UUID"}
+                },
+                "required": ["offerId"]
+            }
+        ),
+        types.Tool(
+            name="list_departments",
+            description="List all departments in the organization. Useful for understanding org structure and filtering jobs/candidates by department.",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "includeArchived": {"type": "boolean", "description": "Include archived departments (default: false)"}
+                }
+            }
+        ),
     ]
 
 @server.call_tool()
 async def handle_call_tool(name: str, arguments: dict[str, Any]) -> list[types.TextContent]:
-    """Handle tool calls by routing to appropriate Ashby API endpoints."""
+    """Handle tool calls by routing to the verified Ashby API endpoints."""
     try:
-        if name == "create_candidate":
-            response = ashby_client._make_request(
-                "/candidate.create",
-                method="POST",
-                data=arguments
-            )
-            return [types.TextContent(type="text", text=f"Created candidate: {json.dumps(response, indent=2)}")]
-            
-        elif name == "search_candidates":
-            # Filter out empty string values to avoid Ashby API invalid_input errors
+        # ── Candidate Discovery & Details ──────────────────────────
+        if name == "search_candidates":
             filtered_args = {k: v for k, v in arguments.items() if v}
-            response = ashby_client._make_request(
-                "/candidate.search",
-                method="POST",
-                data=filtered_args
-            )
-            return [types.TextContent(type="text", text=f"Search results: {json.dumps(response, indent=2)}")]
-            
+            response = ashby_client._make_request("/candidate.search", data=filtered_args)
+            return [types.TextContent(type="text", text=json.dumps(response, indent=2))]
+
         elif name == "list_candidates":
-            response = ashby_client._make_request(
-                "/candidate.list",
-                method="POST",
-                data=arguments
-            )
-            return [types.TextContent(type="text", text=f"Candidate list: {json.dumps(response, indent=2)}")]
+            response = ashby_client._make_request("/candidate.list", data=arguments)
+            return [types.TextContent(type="text", text=json.dumps(response, indent=2))]
 
         elif name == "get_candidate_info":
-            response = ashby_client._make_request(
-                "/candidate.info",
-                method="POST",
-                data={"id": arguments["candidate_id"]}
-            )
-            return [types.TextContent(type="text", text=f"Candidate info: {json.dumps(response, indent=2)}")]
+            response = ashby_client._make_request("/candidate.info", data=arguments)
+            return [types.TextContent(type="text", text=json.dumps(response, indent=2))]
 
         elif name == "get_resume_url":
-            response = ashby_client._make_request(
-                "/file.info",
-                method="POST",
-                data={"fileHandle": arguments["file_handle"]}
-            )
-            return [types.TextContent(type="text", text=f"Resume file info: {json.dumps(response, indent=2)}")]
+            response = ashby_client._make_request("/file.info", data=arguments)
+            return [types.TextContent(type="text", text=json.dumps(response, indent=2))]
 
         elif name == "list_candidate_notes":
-            data = {"candidateId": arguments["candidate_id"]}
-            if "cursor" in arguments:
-                data["cursor"] = arguments["cursor"]
-            if "limit" in arguments:
-                data["limit"] = arguments["limit"]
-            response = ashby_client._make_request(
-                "/candidate.listNotes",
-                method="POST",
-                data=data
-            )
-            return [types.TextContent(type="text", text=f"Candidate notes: {json.dumps(response, indent=2)}")]
+            response = ashby_client._make_request("/candidate.listNotes", data=arguments)
+            return [types.TextContent(type="text", text=json.dumps(response, indent=2))]
 
-        elif name == "create_candidate_note":
-            note_type = arguments.get("note_type", "text/plain")
-            note_content = arguments["note"]
-            if note_type == "text/html":
-                note_data = {"value": note_content, "type": "text/html"}
-            else:
-                note_data = note_content
+        # ── Application Tracking ──────────────────────────────────
+        elif name == "list_applications":
+            response = ashby_client._make_request("/application.list", data=arguments)
+            return [types.TextContent(type="text", text=json.dumps(response, indent=2))]
 
-            response = ashby_client._make_request(
-                "/candidate.createNote",
-                method="POST",
-                data={
-                    "candidateId": arguments["candidate_id"],
-                    "note": note_data
-                }
-            )
-            return [types.TextContent(type="text", text=f"Created note: {json.dumps(response, indent=2)}")]
+        elif name == "get_application_info":
+            response = ashby_client._make_request("/application.info", data=arguments)
+            return [types.TextContent(type="text", text=json.dumps(response, indent=2))]
 
         elif name == "get_application_history":
-            data = {"applicationId": arguments["application_id"]}
-            if "cursor" in arguments:
-                data["cursor"] = arguments["cursor"]
-            if "limit" in arguments:
-                data["limit"] = arguments["limit"]
-            response = ashby_client._make_request(
-                "/application.listHistory",
-                method="POST",
-                data=data
-            )
-            return [types.TextContent(type="text", text=f"Application history: {json.dumps(response, indent=2)}")]
+            response = ashby_client._make_request("/application.listHistory", data=arguments)
+            return [types.TextContent(type="text", text=json.dumps(response, indent=2))]
 
         elif name == "get_application_feedback":
-            data = {"applicationId": arguments["application_id"]}
-            if "cursor" in arguments:
-                data["cursor"] = arguments["cursor"]
-            if "limit" in arguments:
-                data["limit"] = arguments["limit"]
-            response = ashby_client._make_request(
-                "/applicationFeedback.list",
-                method="POST",
-                data=data
-            )
-            return [types.TextContent(type="text", text=f"Application feedback: {json.dumps(response, indent=2)}")]
+            response = ashby_client._make_request("/applicationFeedback.list", data=arguments)
+            return [types.TextContent(type="text", text=json.dumps(response, indent=2))]
 
-        elif name == "create_job":
-            response = ashby_client._make_request(
-                "/job.create",
-                method="POST",
-                data=arguments
-            )
-            return [types.TextContent(type="text", text=f"Created job: {json.dumps(response, indent=2)}")]
-            
+        # ── Job & Opening Intelligence ────────────────────────────
         elif name == "search_jobs":
-            response = ashby_client._make_request(
-                "/job.search",
-                method="POST",
-                data=arguments
-            )
-            return [types.TextContent(type="text", text=f"Job search results: {json.dumps(response, indent=2)}")]
-            
-        elif name == "create_application":
-            response = ashby_client._make_request(
-                "/application.create",
-                method="POST",
-                data=arguments
-            )
-            return [types.TextContent(type="text", text=f"Created application: {json.dumps(response, indent=2)}")]
-            
-        elif name == "list_applications":
-            response = ashby_client._make_request(
-                "/application.list",
-                method="POST",
-                data=arguments
-            )
-            return [types.TextContent(type="text", text=f"Application list: {json.dumps(response, indent=2)}")]
-            
-        elif name == "create_interview":
-            response = ashby_client._make_request(
-                "/interview.create",
-                method="POST",
-                data=arguments
-            )
-            return [types.TextContent(type="text", text=f"Created interview: {json.dumps(response, indent=2)}")]
-            
+            response = ashby_client._make_request("/job.search", data=arguments)
+            return [types.TextContent(type="text", text=json.dumps(response, indent=2))]
+
+        elif name == "list_jobs":
+            response = ashby_client._make_request("/job.list", data=arguments)
+            return [types.TextContent(type="text", text=json.dumps(response, indent=2))]
+
+        elif name == "get_job_info":
+            response = ashby_client._make_request("/job.info", data=arguments)
+            return [types.TextContent(type="text", text=json.dumps(response, indent=2))]
+
+        elif name == "list_openings":
+            response = ashby_client._make_request("/opening.list", data=arguments)
+            return [types.TextContent(type="text", text=json.dumps(response, indent=2))]
+
+        elif name == "get_opening_info":
+            response = ashby_client._make_request("/opening.info", data=arguments)
+            return [types.TextContent(type="text", text=json.dumps(response, indent=2))]
+
+        # ── Interview Intelligence ────────────────────────────────
         elif name == "list_interviews":
-            response = ashby_client._make_request(
-                "/interview.list",
-                method="POST",
-                data=arguments
-            )
-            return [types.TextContent(type="text", text=f"Interview list: {json.dumps(response, indent=2)}")]
-            
-        elif name == "get_pipeline_metrics":
-            response = ashby_client._make_request(
-                "/analytics.pipeline",
-                method="POST",
-                data=arguments
-            )
-            return [types.TextContent(type="text", text=f"Pipeline metrics: {json.dumps(response, indent=2)}")]
-            
-        elif name == "bulk_create_candidates":
-            response = ashby_client._make_request(
-                "/candidate.bulkCreate",
-                method="POST",
-                data=arguments
-            )
-            return [types.TextContent(type="text", text=f"Bulk create results: {json.dumps(response, indent=2)}")]
-            
-        elif name == "bulk_update_applications":
-            response = ashby_client._make_request(
-                "/application.bulkUpdate",
-                method="POST",
-                data=arguments
-            )
-            return [types.TextContent(type="text", text=f"Bulk update results: {json.dumps(response, indent=2)}")]
-            
-        elif name == "bulk_schedule_interviews":
-            response = ashby_client._make_request(
-                "/interview.bulkSchedule",
-                method="POST",
-                data=arguments
-            )
-            return [types.TextContent(type="text", text=f"Bulk schedule results: {json.dumps(response, indent=2)}")]
-            
+            response = ashby_client._make_request("/interview.list", data=arguments)
+            return [types.TextContent(type="text", text=json.dumps(response, indent=2))]
+
+        elif name == "get_interview_info":
+            response = ashby_client._make_request("/interview.info", data=arguments)
+            return [types.TextContent(type="text", text=json.dumps(response, indent=2))]
+
+        elif name == "list_interview_schedules":
+            response = ashby_client._make_request("/interviewSchedule.list", data=arguments)
+            return [types.TextContent(type="text", text=json.dumps(response, indent=2))]
+
+        elif name == "list_interview_events":
+            response = ashby_client._make_request("/interviewEvent.list", data=arguments)
+            return [types.TextContent(type="text", text=json.dumps(response, indent=2))]
+
+        elif name == "list_interview_stages":
+            response = ashby_client._make_request("/interviewStage.list", data=arguments)
+            return [types.TextContent(type="text", text=json.dumps(response, indent=2))]
+
+        elif name == "list_interview_plans":
+            response = ashby_client._make_request("/interviewPlan.list", data=arguments)
+            return [types.TextContent(type="text", text=json.dumps(response, indent=2))]
+
+        # ── Offers & Organization ─────────────────────────────────
+        elif name == "list_offers":
+            response = ashby_client._make_request("/offer.list", data=arguments)
+            return [types.TextContent(type="text", text=json.dumps(response, indent=2))]
+
+        elif name == "get_offer_info":
+            response = ashby_client._make_request("/offer.info", data=arguments)
+            return [types.TextContent(type="text", text=json.dumps(response, indent=2))]
+
+        elif name == "list_departments":
+            response = ashby_client._make_request("/department.list", data=arguments)
+            return [types.TextContent(type="text", text=json.dumps(response, indent=2))]
+
         else:
             raise ValueError(f"Unknown tool: {name}")
-            
+
     except Exception as e:
         return [types.TextContent(type="text", text=f"Error executing {name}: {str(e)}")]
 
@@ -639,4 +573,4 @@ async def run():
         )
 
 if __name__ == "__main__":
-    asyncio.run(run()) 
+    asyncio.run(run())
