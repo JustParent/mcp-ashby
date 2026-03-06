@@ -6,6 +6,7 @@
 # ]
 # ///
 import asyncio
+import base64
 import json
 from typing import Any, Optional
 import os
@@ -16,6 +17,50 @@ import mcp.types as types
 from mcp.server import Server, NotificationOptions
 from mcp.server.models import InitializationOptions
 import mcp.server.stdio
+
+"""
+Ashby MCP Server - Model Context Protocol server for Ashby ATS integration.
+
+This server provides tools to interact with the Ashby API including:
+- Candidate management (create, search, list, get detailed info)
+- Resume/file access
+- Notes (list and create)
+- Application history and activity timeline
+- Interview feedback and scorecards
+- Job management
+- Interview scheduling
+- Analytics
+
+## Important Distinctions
+
+**Candidate ID vs Application ID**:
+- Candidate-level tools (get_candidate_info, list_candidate_notes, create_candidate_note)
+  require a `candidate_id`
+- Application-level tools (get_application_history, get_application_feedback)
+  require an `application_id`
+- Use `get_candidate_info` to retrieve a candidate's `applicationIds` to bridge between them
+
+## API Limitations
+
+**Not Available via API** (visible in Ashby UI only):
+- Email communication history
+- SMS/text message history
+
+**Other Notes**:
+- File download URLs from `get_resume_url` may expire over time
+- Some endpoints require specific Ashby API permissions (candidatesRead, candidatesWrite)
+
+## Example Workflows
+
+1. **Get candidate's LinkedIn and resume**:
+   search_candidates → get_candidate_info → get_resume_url
+
+2. **View and add notes**:
+   get_candidate_info → list_candidate_notes → create_candidate_note
+
+3. **Review application progress**:
+   get_candidate_info → get_application_history → get_application_feedback
+"""
 
 class AshbyClient:
     """Handles Ashby operations and caching."""
@@ -36,8 +81,9 @@ class AshbyClient:
             if not self.api_key:
                 raise ValueError("ASHBY_API_KEY environment variable not set")
             
+            credentials = base64.b64encode(f"{self.api_key}:".encode()).decode()
             self.headers = {
-                "Authorization": f"Basic {self.api_key}",
+                "Authorization": f"Basic {credentials}",
                 "Content-Type": "application/json"
             }
             return True
@@ -126,7 +172,86 @@ async def handle_list_tools() -> list[types.Tool]:
                 }
             }
         ),
-        
+        types.Tool(
+            name="get_candidate_info",
+            description="Get detailed information about a specific candidate including LinkedIn, resume, and application IDs",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "candidate_id": {"type": "string", "description": "The unique ID of the candidate"}
+                },
+                "required": ["candidate_id"]
+            }
+        ),
+        types.Tool(
+            name="get_resume_url",
+            description="Get a downloadable URL for a candidate's resume file",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "file_handle": {"type": "string", "description": "The file handle from candidate resumeFileHandle.handle field"}
+                },
+                "required": ["file_handle"]
+            }
+        ),
+        types.Tool(
+            name="list_candidate_notes",
+            description="List all notes on a candidate's profile",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "candidate_id": {"type": "string", "description": "The ID of the candidate"},
+                    "cursor": {"type": "string", "description": "Pagination cursor for next page"},
+                    "limit": {"type": "integer", "description": "Number of results to return", "default": 100}
+                },
+                "required": ["candidate_id"]
+            }
+        ),
+        types.Tool(
+            name="create_candidate_note",
+            description="Create a new note on a candidate's profile",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "candidate_id": {"type": "string", "description": "The ID of the candidate"},
+                    "note": {"type": "string", "description": "The note content"},
+                    "note_type": {
+                        "type": "string",
+                        "enum": ["text/plain", "text/html"],
+                        "description": "The format of the note (default: text/plain)",
+                        "default": "text/plain"
+                    }
+                },
+                "required": ["candidate_id", "note"]
+            }
+        ),
+        types.Tool(
+            name="get_application_history",
+            description="Get the activity timeline and stage changes for an application",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "application_id": {"type": "string", "description": "The ID of the application"},
+                    "cursor": {"type": "string", "description": "Pagination cursor for next page"},
+                    "limit": {"type": "integer", "description": "Number of results to return", "default": 25}
+                },
+                "required": ["application_id"]
+            }
+        ),
+        types.Tool(
+            name="get_application_feedback",
+            description="Get interview feedback and scorecards for an application",
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "application_id": {"type": "string", "description": "The ID of the application"},
+                    "cursor": {"type": "string", "description": "Pagination cursor for next page"},
+                    "limit": {"type": "integer", "description": "Number of results to return", "default": 100}
+                },
+                "required": ["application_id"]
+            }
+        ),
+
         # Job Management Tools
         types.Tool(
             name="create_job",
@@ -318,7 +443,7 @@ async def handle_call_tool(name: str, arguments: dict[str, Any]) -> list[types.T
                 method="POST",
                 data=arguments
             )
-            return [types.TextContent(text=f"Created candidate: {json.dumps(response, indent=2)}")]
+            return [types.TextContent(type="text", text=f"Created candidate: {json.dumps(response, indent=2)}")]
             
         elif name == "search_candidates":
             response = ashby_client._make_request(
@@ -326,7 +451,7 @@ async def handle_call_tool(name: str, arguments: dict[str, Any]) -> list[types.T
                 method="POST",
                 data=arguments
             )
-            return [types.TextContent(text=f"Search results: {json.dumps(response, indent=2)}")]
+            return [types.TextContent(type="text", text=f"Search results: {json.dumps(response, indent=2)}")]
             
         elif name == "list_candidates":
             response = ashby_client._make_request(
@@ -334,15 +459,88 @@ async def handle_call_tool(name: str, arguments: dict[str, Any]) -> list[types.T
                 method="POST",
                 data=arguments
             )
-            return [types.TextContent(text=f"Candidate list: {json.dumps(response, indent=2)}")]
-            
+            return [types.TextContent(type="text", text=f"Candidate list: {json.dumps(response, indent=2)}")]
+
+        elif name == "get_candidate_info":
+            response = ashby_client._make_request(
+                "/candidate.info",
+                method="POST",
+                data={"id": arguments["candidate_id"]}
+            )
+            return [types.TextContent(type="text", text=f"Candidate info: {json.dumps(response, indent=2)}")]
+
+        elif name == "get_resume_url":
+            response = ashby_client._make_request(
+                "/file.info",
+                method="POST",
+                data={"fileHandle": arguments["file_handle"]}
+            )
+            return [types.TextContent(type="text", text=f"Resume file info: {json.dumps(response, indent=2)}")]
+
+        elif name == "list_candidate_notes":
+            data = {"candidateId": arguments["candidate_id"]}
+            if "cursor" in arguments:
+                data["cursor"] = arguments["cursor"]
+            if "limit" in arguments:
+                data["limit"] = arguments["limit"]
+            response = ashby_client._make_request(
+                "/candidate.listNotes",
+                method="POST",
+                data=data
+            )
+            return [types.TextContent(type="text", text=f"Candidate notes: {json.dumps(response, indent=2)}")]
+
+        elif name == "create_candidate_note":
+            note_type = arguments.get("note_type", "text/plain")
+            note_content = arguments["note"]
+            if note_type == "text/html":
+                note_data = {"value": note_content, "type": "text/html"}
+            else:
+                note_data = note_content
+
+            response = ashby_client._make_request(
+                "/candidate.createNote",
+                method="POST",
+                data={
+                    "candidateId": arguments["candidate_id"],
+                    "note": note_data
+                }
+            )
+            return [types.TextContent(type="text", text=f"Created note: {json.dumps(response, indent=2)}")]
+
+        elif name == "get_application_history":
+            data = {"applicationId": arguments["application_id"]}
+            if "cursor" in arguments:
+                data["cursor"] = arguments["cursor"]
+            if "limit" in arguments:
+                data["limit"] = arguments["limit"]
+            response = ashby_client._make_request(
+                "/application.listHistory",
+                method="POST",
+                data=data
+            )
+            return [types.TextContent(type="text", text=f"Application history: {json.dumps(response, indent=2)}")]
+
+        elif name == "get_application_feedback":
+            data = {"applicationId": arguments["application_id"]}
+            if "cursor" in arguments:
+                data["cursor"] = arguments["cursor"]
+            if "limit" in arguments:
+                data["limit"] = arguments["limit"]
+            response = ashby_client._make_request(
+                "/applicationFeedback.list",
+                method="POST",
+                data=data
+            )
+            return [types.TextContent(type="text", text=f"Application feedback: {json.dumps(response, indent=2)}")]
+
         elif name == "create_job":
             response = ashby_client._make_request(
                 "/job.create",
                 method="POST",
                 data=arguments
             )
-            return [types.TextContent(text=f"Created job: {json.dumps(response, indent=2)}")]
+            return [types.TextContent(type="text", text=f"Created job: {json.dumps(response, indent=2)}")]
             
         elif name == "search_jobs":
             response = ashby_client._make_request(
@@ -350,7 +548,7 @@ async def handle_call_tool(name: str, arguments: dict[str, Any]) -> list[types.T
                 method="POST",
                 data=arguments
             )
-            return [types.TextContent(text=f"Job search results: {json.dumps(response, indent=2)}")]
+            return [types.TextContent(type="text", text=f"Job search results: {json.dumps(response, indent=2)}")]
             
         elif name == "create_application":
             response = ashby_client._make_request(
@@ -358,7 +556,7 @@ async def handle_call_tool(name: str, arguments: dict[str, Any]) -> list[types.T
                 method="POST",
                 data=arguments
             )
-            return [types.TextContent(text=f"Created application: {json.dumps(response, indent=2)}")]
+            return [types.TextContent(type="text", text=f"Created application: {json.dumps(response, indent=2)}")]
             
         elif name == "list_applications":
             response = ashby_client._make_request(
@@ -366,7 +564,7 @@ async def handle_call_tool(name: str, arguments: dict[str, Any]) -> list[types.T
                 method="POST",
                 data=arguments
             )
-            return [types.TextContent(text=f"Application list: {json.dumps(response, indent=2)}")]
+            return [types.TextContent(type="text", text=f"Application list: {json.dumps(response, indent=2)}")]
             
         elif name == "create_interview":
             response = ashby_client._make_request(
@@ -374,7 +572,7 @@ async def handle_call_tool(name: str, arguments: dict[str, Any]) -> list[types.T
                 method="POST",
                 data=arguments
             )
-            return [types.TextContent(text=f"Created interview: {json.dumps(response, indent=2)}")]
+            return [types.TextContent(type="text", text=f"Created interview: {json.dumps(response, indent=2)}")]
             
         elif name == "list_interviews":
             response = ashby_client._make_request(
@@ -382,7 +580,7 @@ async def handle_call_tool(name: str, arguments: dict[str, Any]) -> list[types.T
                 method="POST",
                 data=arguments
             )
-            return [types.TextContent(text=f"Interview list: {json.dumps(response, indent=2)}")]
+            return [types.TextContent(type="text", text=f"Interview list: {json.dumps(response, indent=2)}")]
             
         elif name == "get_pipeline_metrics":
             response = ashby_client._make_request(
@@ -390,7 +588,7 @@ async def handle_call_tool(name: str, arguments: dict[str, Any]) -> list[types.T
                 method="POST",
                 data=arguments
             )
-            return [types.TextContent(text=f"Pipeline metrics: {json.dumps(response, indent=2)}")]
+            return [types.TextContent(type="text", text=f"Pipeline metrics: {json.dumps(response, indent=2)}")]
             
         elif name == "bulk_create_candidates":
             response = ashby_client._make_request(
@@ -398,7 +596,7 @@ async def handle_call_tool(name: str, arguments: dict[str, Any]) -> list[types.T
                 method="POST",
                 data=arguments
             )
-            return [types.TextContent(text=f"Bulk create results: {json.dumps(response, indent=2)}")]
+            return [types.TextContent(type="text", text=f"Bulk create results: {json.dumps(response, indent=2)}")]
             
         elif name == "bulk_update_applications":
             response = ashby_client._make_request(
@@ -406,7 +604,7 @@ async def handle_call_tool(name: str, arguments: dict[str, Any]) -> list[types.T
                 method="POST",
                 data=arguments
             )
-            return [types.TextContent(text=f"Bulk update results: {json.dumps(response, indent=2)}")]
+            return [types.TextContent(type="text", text=f"Bulk update results: {json.dumps(response, indent=2)}")]
             
         elif name == "bulk_schedule_interviews":
             response = ashby_client._make_request(
@@ -414,17 +612,29 @@ async def handle_call_tool(name: str, arguments: dict[str, Any]) -> list[types.T
                 method="POST",
                 data=arguments
             )
-            return [types.TextContent(text=f"Bulk schedule results: {json.dumps(response, indent=2)}")]
+            return [types.TextContent(type="text", text=f"Bulk schedule results: {json.dumps(response, indent=2)}")]
             
         else:
             raise ValueError(f"Unknown tool: {name}")
             
     except Exception as e:
-        return [types.TextContent(text=f"Error executing {name}: {str(e)}")]
+        return [types.TextContent(type="text", text=f"Error executing {name}: {str(e)}")]
 
 async def run():
     """Run the MCP server."""
-    await mcp.server.stdio.run_async(server)
+    async with mcp.server.stdio.stdio_server() as (read_stream, write_stream):
+        await server.run(
+            read_stream,
+            write_stream,
+            InitializationOptions(
+                server_name="ashby",
+                server_version="0.1.0",
+                capabilities=server.get_capabilities(
+                    notification_options=NotificationOptions(),
+                    experimental_capabilities={},
+                ),
+            ),
+        )
 
 if __name__ == "__main__":
     asyncio.run(run()) 
