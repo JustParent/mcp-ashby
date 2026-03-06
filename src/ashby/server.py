@@ -446,10 +446,12 @@ async def handle_call_tool(name: str, arguments: dict[str, Any]) -> list[types.T
             return [types.TextContent(type="text", text=f"Created candidate: {json.dumps(response, indent=2)}")]
             
         elif name == "search_candidates":
+            # Filter out empty string values to avoid Ashby API invalid_input errors
+            filtered_args = {k: v for k, v in arguments.items() if v}
             response = ashby_client._make_request(
                 "/candidate.search",
                 method="POST",
-                data=arguments
+                data=filtered_args
             )
             return [types.TextContent(type="text", text=f"Search results: {json.dumps(response, indent=2)}")]
             
