@@ -41,6 +41,12 @@ endpoints (create, update, delete, schedule) are exposed.
 - **Jobs vs Openings**: A Job is a role being hired for. An Opening represents a
   specific headcount slot within a job (e.g., "3 openings for Software Engineer").
   Use openings to answer "are we ahead or behind plan?" questions.
+- **External IDs / workforce planning**: Openings and Jobs both carry `customFields`,
+  which is where identifiers from an external workforce planning system (such as a
+  HiBob WFP Opening ID `O-342524` or Position ID `P-53902`) are typically stored.
+  `list_custom_fields` reveals which field holds which identifier; `search_openings`
+  resolves an opening identifier back to the Ashby opening and its jobs. Custom
+  fields flagged `isPrivate` require an API key granted access to private fields.
 - **Interview Plans vs Stages vs Schedules vs Events**: An interview plan defines
   the process for a job. Stages are steps within a plan. Schedules are actual
   scheduled interview sessions. Events are individual calendar events within a schedule.
@@ -62,6 +68,13 @@ endpoints (create, update, delete, schedule) are exposed.
 
 5. **"Are we ahead or behind plan?"**:
    list_jobs (filter by status) → list_openings (check openingState: Open vs Filled)
+
+5b. **"What is the status of HiBob opening O-342524?"** (cross-system lookup):
+   search_openings(identifier="O-342524") → read openingState and latestVersion.jobIds
+   → get_job_info(id=<jobId>) for the corresponding Ashby job.
+   If the identifier is held in a custom field rather than the opening's own
+   identifier, call list_custom_fields first to find which Opening-scoped field
+   holds it, then read that field off list_openings / get_opening_info.
 
 6. **"How many hires in Q1?"**:
    list_applications (filter by status=Hired, createdAfter/before dates)
@@ -120,6 +133,11 @@ load_dotenv()
 ashby_client = AshbyClient()
 if not ashby_client.connect():
     print("Failed to initialize Ashby connection")
+
+def _drop_empty(arguments: dict) -> dict:
+    """Strip empty values. Ashby rejects empty-string params with invalid_input."""
+    return {k: v for k, v in arguments.items() if v not in (None, "", [], {})}
+
 
 @server.list_tools()
 async def handle_list_tools() -> list[types.Tool]:
@@ -264,7 +282,8 @@ async def handle_list_tools() -> list[types.Tool]:
                 "type": "object",
                 "properties": {
                     "title": {"type": "string", "description": "Job title to search for"}
-                }
+                },
+                "required": ["title"]
             }
         ),
         types.Tool(
@@ -329,6 +348,27 @@ async def handle_list_tools() -> list[types.Tool]:
                     "openingId": {"type": "string", "description": "The opening UUID"}
                 },
                 "required": ["openingId"]
+            }
+        ),
+        types.Tool(
+            name="search_openings",
+            description=(
+                "Find an opening by its human-readable identifier rather than its UUID. "
+                "This is the reverse lookup for cross-referencing an external workforce "
+                "planning system (e.g. HiBob WFP): given an opening identifier such as "
+                "'O-342524', return the matching Ashby opening, its openingState and its "
+                "linked jobIds. Use this instead of paginating list_openings when you "
+                "already know the identifier."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "identifier": {
+                        "type": "string",
+                        "description": "The opening identifier to search for, e.g. 'O-342524'"
+                    }
+                },
+                "required": ["identifier"]
             }
         ),
 
@@ -446,6 +486,28 @@ async def handle_list_tools() -> list[types.Tool]:
                 }
             }
         ),
+        types.Tool(
+            name="list_custom_fields",
+            description=(
+                "List every custom field definition configured in Ashby. Each result has a "
+                "title, an objectType (Application/Candidate/Employee/Job/Offer/Opening/"
+                "Talent_Project), a fieldType and an isPrivate flag. Call this FIRST when "
+                "cross-referencing an external system: it tells you which custom field on an "
+                "Opening or Job actually holds the external identifier (e.g. a HiBob WFP "
+                "Opening ID or Position ID), so you can read the right field off "
+                "list_openings / get_opening_info instead of guessing at titles. Note that "
+                "fields with isPrivate=true are only readable by an API key granted access "
+                "to private fields."
+            ),
+            inputSchema={
+                "type": "object",
+                "properties": {
+                    "includeArchived": {"type": "boolean", "description": "Include archived custom fields (default: false)"},
+                    "cursor": {"type": "string", "description": "Pagination cursor"},
+                    "syncToken": {"type": "string", "description": "Token for incremental sync"}
+                }
+            }
+        ),
     ]
 
 @server.call_tool()
@@ -510,6 +572,14 @@ async def handle_call_tool(name: str, arguments: dict[str, Any]) -> list[types.T
 
         elif name == "get_opening_info":
             response = ashby_client._make_request("/opening.info", data=arguments)
+            return [types.TextContent(type="text", text=json.dumps(response, indent=2))]
+
+        elif name == "search_openings":
+            response = ashby_client._make_request("/opening.search", data=_drop_empty(arguments))
+            return [types.TextContent(type="text", text=json.dumps(response, indent=2))]
+
+        elif name == "list_custom_fields":
+            response = ashby_client._make_request("/customField.list", data=_drop_empty(arguments))
             return [types.TextContent(type="text", text=json.dumps(response, indent=2))]
 
         # ── Interview Intelligence ────────────────────────────────

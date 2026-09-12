@@ -19,6 +19,13 @@ authors = [
     { name = "Nicolas Thouzeau", email = "nicolas.thouzeau@gmail.com" }
 ]
 
+[project.optional-dependencies]
+dev = ["pytest"]
+
+[tool.pytest.ini_options]
+testpaths = ["tests"]
+pythonpath = [".", "tests"]
+
 [project.urls]
 Homepage = "https://github.com/thz/MCP-Ashby"
 
