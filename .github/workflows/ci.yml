@@ -18,6 +18,9 @@ concurrency:
 permissions:
   contents: read
 
+# Actions are pinned to exact tags, not floating majors. setup-uv stopped
+# publishing a floating major tag after v7, so `@v10` does not resolve at all.
+
 jobs:
   test:
     name: tests (py${{ matrix.python }})
@@ -30,9 +33,9 @@ jobs:
         # interpreter is exercised.
         python: ["3.10", "3.11", "3.12", "3.13"]
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@v7.0.1
 
-      - uses: astral-sh/setup-uv@v10
+      - uses: astral-sh/setup-uv@v10.1.0
         with:
           enable-cache: true
 
@@ -51,9 +54,9 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 10
     steps:
-      - uses: actions/checkout@v7
+      - uses: actions/checkout@v7.0.1
 
-      - uses: astral-sh/setup-uv@v10
+      - uses: astral-sh/setup-uv@v10.1.0
         with:
           enable-cache: true
 
