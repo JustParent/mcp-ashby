@@ -1,8 +1,8 @@
 # /// script
 # dependencies = [
-#   "mcp",
-#   "requests",
-#   "python-dotenv"
+#   "mcp>=1.1.2,<2",
+#   "requests>=2.32,<3",
+#   "python-dotenv>=1.0,<2"
 # ]
 # ///
 import asyncio
