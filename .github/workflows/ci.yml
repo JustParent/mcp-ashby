@@ -1,0 +1,82 @@
+name: CI
+
+on:
+  push:
+    branches: [main]
+  pull_request:
+  schedule:
+    # Weekly, Mondays. The outage this suite was built around came from a new
+    # upstream release rather than any change to this repo, so the fresh-resolve
+    # job has to run on a clock. Nothing triggered by a commit would have caught it.
+    - cron: "17 6 * * 1"
+  workflow_dispatch:
+
+concurrency:
+  group: ${{ github.workflow }}-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
+
+# Actions are pinned to exact tags, not floating majors. setup-uv stopped
+# publishing a floating major tag after v7, so `@v10` does not resolve at all.
+
+jobs:
+  test:
+    name: tests (py${{ matrix.python }})
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    strategy:
+      fail-fast: false
+      matrix:
+        # pyproject declares requires-python = ">=3.10", so every supported
+        # interpreter is exercised.
+        python: ["3.10", "3.11", "3.12", "3.13"]
+    steps:
+      - uses: actions/checkout@v7.0.1
+
+      - uses: astral-sh/setup-uv@v10.1.0
+        with:
+          enable-cache: true
+
+      - name: Install locked dependencies
+        # --locked fails outright if uv.lock has drifted from pyproject.toml, so a
+        # dependency edit that was never relocked cannot reach main.
+        run: uv sync --locked --extra dev --python ${{ matrix.python }}
+
+      - name: Run test suite
+        # tests/test_live_api.py auto-skips when ASHBY_API_KEY is absent, so this
+        # needs no secret and stays safe to run on pull requests from forks.
+        run: uv run --python ${{ matrix.python }} python -m pytest tests/ -q
+
+  prod-install:
+    name: production install path
+    runs-on: ubuntu-latest
+    timeout-minutes: 10
+    steps:
+      - uses: actions/checkout@v7.0.1
+
+      - uses: astral-sh/setup-uv@v10.1.0
+        with:
+          enable-cache: true
+
+      - name: Build and install, resolving fresh and ignoring uv.lock
+        # Production installs with `uvx --from mcp-ashby-connector ashby`, which
+        # resolves from the wheel's dependency metadata and never reads uv.lock.
+        # The `test` job above cannot reproduce that by construction: it is locked.
+        # This job is the one that catches an incompatible upstream release.
+        run: |
+          uv venv /tmp/prod --python 3.12
+          uv pip install --python /tmp/prod/bin/python --no-sources .
+
+      - name: Report resolved versions
+        run: >-
+          /tmp/prod/bin/python -c
+          "import importlib.metadata as m;
+          print('\n'.join(f'{p}=={m.version(p)}' for p in ('mcp','requests','python-dotenv')))"
+
+      - name: Smoke test the installed server over stdio
+        # The regression this guards against killed the server during import, so it
+        # was invisible to any test importing from the working tree. This spawns the
+        # installed console script and speaks real JSON-RPC to it.
+        run: /tmp/prod/bin/python tests/smoke_stdio.py /tmp/prod/bin/ashby
