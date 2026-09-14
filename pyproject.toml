@@ -23,7 +23,9 @@ authors = [
 ]
 
 [project.optional-dependencies]
-dev = ["pytest"]
+# tomli backfills tomllib, which only landed in the stdlib in 3.11, so the
+# packaging guards can read pyproject.toml on the oldest supported Python.
+dev = ["pytest>=8,<9", "tomli>=2,<3 ; python_version < '3.11'"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
